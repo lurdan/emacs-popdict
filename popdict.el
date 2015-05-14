@@ -1,4 +1,4 @@
-;;; popdict.el -- Consult various dictionaries and show result using tooltip
+;;; popdict.el --- Consult various dictionaries and show result using tooltip
 
 ;; Copyright (C) 2015 KURASHIKI Satoru
 

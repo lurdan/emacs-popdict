@@ -5,11 +5,11 @@
 ;; Filename: popdict.el
 ;; Description: Consult various dictionaries and show result using tooltip
 ;; Author: KURASHIKI Satoru
-;; Created:
-;; Version:
-;; Package-Requires:
+;; Created: 2015-04-23
+;; Version: 0.0.1
+;; Package-Requires: ((pos-tip "0.4.6"))
+;; URL: https://github.com/lurdan/emacs-popdict
 ;; Keywords: dictionary
-;; URL:
 
 ;; This program is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -33,6 +33,7 @@
 (defconst popdict-version "0.0.1")
 
 (require 'pos-tip)
+(require 'url-http)
 
 ;; TODO: README.org 作る
 ;; TODO: DOCSTRING ちゃんと書く
@@ -41,122 +42,237 @@
 ;; Settings
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; TODO: とりあえず defvar ですませているものを defgroup と defcustom に整理
+(defgroup popdict nil
+  "Popdict group"
+  :group 'applications)
 
-(defvar popdict-timeout-auto 5
+(defcustom popdict-mode-delay 0.80
+  ""
+  :type 'int
+  :group 'popdict)
+
+;; lookup が動かないのでひとまず weblio をデフォルトに
+(defcustom popdict-search-backend 'popdict-backend-weblio
+  "dictionary backend function to use for searching."
+  :type 'string
+  :group 'popdict)
+
+(defcustom popdict-capture-auto nil
+  ""
+  :type 'boolean
+  :group 'popdict)
+
+;; for pos-tip
+(defcustom popdict-timeout-auto 5
   "Timeout of tooltip for automatic popup (in seconds).
-See `pos-tip-show' for details.")
+See `pos-tip-show' for details."
+  :type 'int
+  :group 'popdict)
 
-(defvar popdict-timeout-man 0
+(defcustom popdict-timeout-man 0
   "Timeout of tooltip for manual popup (in seconds).
-See `pos-tip-show' for details.")
+See `pos-tip-show' for details."
+  :type 'int
+  :group 'popdict)
 
-(defvar popdict-max-width 80
-  "Maximum width of tooltip.  nil means use display width.")
+(defcustom popdict-max-width 80
+  "Maximum width of tooltip.  nil means use display width."
+  :type 'int
+  :group 'popdict)
 
 (defface popdict
   '((t
      :foreground "white"
      :background "RoyalBlue4"))
-  "Face for description in tooltip.")
+  "Face for description in tooltip."
+  :group 'popdict)
 
 (defface popdict-entry
   '((t
      :foreground "cyan"
      :bold t
      :inherit popdict))
-  "Face for entry in tooltip.")
+  "Face for entry in tooltip."
+  :group 'popdict)
 
-(defvar popdict-search-backend 'popdict-search-backend-lookup)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; popdict minor mode
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; TODO: バックエンドを追加する
+(defvar popdict-map
+  (let ((keymap (make-sparse-keymap)))
+    (define-key keymap (kbd "C-c @ C-c") 'popdict)
+    keymap))
 
-;; (defun popdict-search-backend-rdictcc (word)
-;;   ""
-;;   (require 'rdictcc)
-;;   (rdictcc-translate-word-to-string word)
-;;   )
+(define-minor-mode popdict-mode
+  "popdict-mode. Display the meaning of word under the point."
+  :keymap popdict-map
+  :lighter " Popdict"
+  (if popdict-mode
+      (popdict-start-timer)
+    (popdict-stop-timer)))
 
-;; (defun popdict-search-backend-sdic ()
-;;   ""
-;;   (require 'sdic)
-;;   )
+(defvar popdict-timer nil)
+(defun popdict-start-timer ()
+  "start timer."
+  (when popdict-timer
+    (cancel-timer popdict-timer))
+  (setq popdict-timer
+        (run-with-idle-timer popdict-mode-delay t 'popdict-hook)))
 
-;; (defun popdict-search-backend-voca-builder (word)
-;;   ""
-;;   (require 'voca-builder)
-;;   (voca-builder/fetch-meaning word)
-;;   )
+(defun popdict-stop-timer ()
+  "stop timer"
+  (when popdict-timer
+    (cancel-timer popdict-timer)
+    (setq popdict-timer nil)))
 
+(defun popdict-hook ()
+  "running or not running `popdict'."
+  (cond
+   ((not (minibufferp))
+    (condition-case err
+        (progn
+          (unless popdict-mode
+            (setq popdict-mode t))
+          (popdict))
+      (error
+       (unwind-protect
+           (message "Error: %S; popdict-mode now disabled." err)
+         (setq popdict-mode nil)))))
+   (t
+    (setq popdict-mode nil))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Online Backends
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Weblio backend
+(defvar popdict-backend-weblio-url "http://api.weblio.jp/act/quote/v_1_0/e/%s")
+(defun popdict-backend-weblio-parse (buf)
+  (let* ((xml (with-current-buffer buf
+                (set-buffer-multibyte t)
+                (goto-char url-http-end-of-headers)
+                (libxml-parse-html-region (point) (point-max))))
+         (defs (cddr (nth 11 (nth 5 (cadr (cddr (nth 4 (assq 'body xml))))))))
+         (result (mapcar (lambda (x) (if (funcall 'stringp x) x "\n")) defs))
+         )
+    (kill-buffer buf)
+    (replace-regexp-in-string (rx (or (: bos (* (any "\r")))
+                                      ;;(: (* (any " \t\n")) eos)
+                                      )) "" (mapconcat 'identity result ""))
+    ))
+
+(defun popdict-backend-weblio (word)
+  "Search weblio.jp"
+  (let* ((buf (let ((url-mime-charset-string "utf-8")
+                    (url (format popdict-backend-weblio-url (url-hexify-string word))))
+                (url-retrieve-synchronously url t)))
+         (result (popdict-backend-weblio-parse buf)))
+    result))
+
+;; voca-builder (dictionary.com) backend
+(when (require 'voca-builder nil t)
+  (defun popdict-backend-voca-builder (word)
+    "Search dictionary.com using voca-builder."
+    (cdr (voca-builder/fetch-meaning word))
+    )
+  )
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Offline Backends
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; lookup backend
 ;; TODO: lookup2 がない場合はスルーできるように？
-(eval-when-compile (require  'lookup-autoloads))
+(when (require 'lookup-autoloads nil t)
+  ;; WISH: モジュールでなく辞書を選択できるように
+  (defvar popdict-backend-lookup-module "default")
+  (defun popdict-backend-lookup (word)
+    ""
+    (let ((current-prefix-arg nil)
+          (entry (car (lookup-dictionary-search
+                       (car (lookup-module-dictionaries (lookup-get-module popdict-backend-lookup-module)))
+                       (lookup-parse-pattern word)))))
+      (with-current-buffer (lookup-get-buffer (lookup-content-buffer))
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (let ((content (lookup-get-property entry 'content)))
+            (if (and content lookup-enable-format (not lookup-force-update))
+                (insert content)
+              (lookup-with-message (format "Inserting `%s'" (lookup-entry-heading entry))
+                                   (insert (lookup-entry-content entry))
+                                   (when lookup-enable-format
+                                     (lookup-arrange-content entry)
+                                     (lookup-put-property entry 'content (buffer-string)))))
+            (if lookup-enable-format (lookup-adjust-content entry))
+            )
+          ;; arrange functions might change the buffer mode
+          (lookup-content-mode)
+          (set-buffer-modified-p nil))
+                                        ;      (setq lookup-content-entry entry)
+                                        ;      (setq lookup-content-line-heading (lookup-entry-heading entry))
+        (cons word (let ((beg (progn (forward-line 1) (point)))
+                         (end (progn (end-of-buffer) (previous-line 3) (point))))
+                     (buffer-substring beg end)))
+        )))
+  ;; (let ((popdict-backend-lookup-module "english")) (popdict-backend-lookup "test"))
+  )
 
-;; WISH: モジュールでなく辞書を選択できるように
-(defvar popdict-search-backend-lookup-module "default")
-(defun popdict-search-backend-lookup (word)
-  ""
-  (let ((current-prefix-arg nil)
-        (entry (car (lookup-dictionary-search
-                     (car (lookup-module-dictionaries (lookup-get-module popdict-search-backend-lookup-module)))
-                     (lookup-parse-pattern word)))))
-    (with-current-buffer (lookup-get-buffer (lookup-content-buffer))
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (let ((content (lookup-get-property entry 'content)))
-          (if (and content lookup-enable-format (not lookup-force-update))
-              (insert content)
-            (lookup-with-message (format "Inserting `%s'" (lookup-entry-heading entry))
-              (insert (lookup-entry-content entry))
-              (when lookup-enable-format
-                (lookup-arrange-content entry)
-                (lookup-put-property entry 'content (buffer-string)))))
-          (if lookup-enable-format (lookup-adjust-content entry))
-          )
-        ;; arrange functions might change the buffer mode
-        (lookup-content-mode)
-        (set-buffer-modified-p nil))
-;      (setq lookup-content-entry entry)
-;      (setq lookup-content-line-heading (lookup-entry-heading entry))
-      (cons word (let ((beg (progn (forward-line 1) (point)))
-                       (end (progn (end-of-buffer) (previous-line 3) (point))))
-                   (buffer-substring beg end)))
-      )))
-;; (let ((popdict-search-backend-lookup-module "english")) (popdict-search-backend-lookup "test"))
+;; rdictcc (dict.cc) backend
+(when (require 'rdictcc nil t)
+  (defun popdict-backend-rdictcc (word)
+    "Search `word' using rdictcc.el"
+    (rdictcc-translate-word-to-string word)
+    )
+  )
 
+;; sdic backend
+;; (when (require 'sdic nil t)
+;;   (defun popdict-backend-sdic ()
+;;     ""
+;;     ))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Auto org-capture
 ;; TODO: ちゃんと実装
-;; org-capture を使って検索結果を記録
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(require 'org-capture)
 ;; 検索結果を文字列展開した上でテンプレートを動的に設定する感じ？
-(defvar popdict-auto-capture nil)
 (defvar popdict-capture-template "apropriate default template")
 (defun popdict-capture ()
   ""
   (interactive)
-  (let ((org-capture-templates popdict-capture-template))
-    (org-capture nil "")
+  (unless popdict-mode
+    (let ((org-capture-templates popdict-capture-template))
+      (org-capture nil "")
+      )
     )
   )
-
-
-
-
-;; TODO: autolookup できるマイナーモードを追加する
 
 ;; WISH: 検索結果を自動でクリップボードに入れられると嬉しい？
 ;;(defvar popdict-auto-kill-ring nil)
 
 ;;文字列を受け取ってバックエンド関数に投げ、検索結果とのコンスセルを返す
 ;;自動キャプチャが有効ならついでに実行
+(defvar popdict-last-word "")
+(defvar popdict-last-desc "")
 (defun popdict-search (item)
   ""
-  (let ((result (funcall popdict-search-backend item)))
-    (if popdict-auto-capture
-        (popdict-capture))
-    result
+  (if (string= popdict-last-word item)
+      (cons popdict-last-word popdict-last-desc)
+    (let ((result (funcall popdict-search-backend item)))
+      (if popdict-capture-auto
+          (popdict-capture))
+      (setq popdict-last-word item
+            popdict-last-desc result)
+      (cons item result)
+      )
     ))
 
-;; WISH: 実装
-;; autolookup 相当の挙動
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Display functions
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (defun popdict-minibuffer (entry)
   ""
   )
@@ -227,14 +343,24 @@ See `pos-tip-show' for details.")
      (pos-tip-tooltip-height height (frame-char-height))))
   )
 
-;; カーソル位置の単語を拾って辞書を検索し、結果を適切な機能で表示する
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interactive commands
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun popdict-switch-backend ()
+  (interactive)
+  )
+
 ;; stem-english 的な処理を自前でやる？ バックエンドに任せる？
 ;; sdic-inline-pos-tip からの複数エントリ処理をどうする？
+
+;;;###autoload
 (defun popdict (&optional entry)
-  ""
+  "カーソル位置の単語を拾って辞書を検索し、結果を適切な機能で表示する"
   (interactive)
-  (if (called-interactively-p 'any)
-      (setq entry (thing-at-point 'word)))
+;;  (if (called-interactively-p 'any)
+  (setq entry (thing-at-point 'word))
+;;  )
   (when entry
     (cond
      (window-system
